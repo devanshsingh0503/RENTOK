@@ -10,19 +10,19 @@ A minimal production-grade LLM Gateway built for the RentOk Backend Intern take-
 - OpenAI-compatible API format
 
 ## Live URL
-> https://llm-gateway-xxxx.onrender.com  ← (replace after deployment)
+> **https://llm-gateway-i14g.onrender.com**
 
 ## Quick Test
 
 ```bash
 # 1. Create a virtual key
-curl -X POST https://your-url.onrender.com/admin/keys \
+curl -X POST https://llm-gateway-i14g.onrender.com/admin/keys \
   -H "Content-Type: application/json" \
-  -H "X-Admin-Secret: your_admin_secret" \
+  -H "X-Admin-Secret: rentok_admin_2024" \
   -d '{ "name": "test-key", "budget_limit": 1.00 }'
 
 # 2. Use the key to call the LLM
-curl -X POST https://your-url.onrender.com/v1/chat/completions \
+curl -X POST https://llm-gateway-i14g.onrender.com/v1/chat/completions \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer vk_REPLACE_WITH_YOUR_KEY" \
   -d '{
@@ -30,10 +30,10 @@ curl -X POST https://your-url.onrender.com/v1/chat/completions \
   }'
 
 # 3. Check usage
-curl "https://your-url.onrender.com/usage?key=vk_REPLACE_WITH_YOUR_KEY"
+curl "https://llm-gateway-i14g.onrender.com/usage?key=vk_REPLACE_WITH_YOUR_KEY"
 
 # 4. Health check
-curl https://your-url.onrender.com/health
+curl https://llm-gateway-i14g.onrender.com/health
 ```
 
 ## Local Setup
