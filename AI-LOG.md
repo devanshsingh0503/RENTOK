@@ -1,89 +1,76 @@
 # AI-LOG.md
-# AI Tool Usage Log
-
-> This document records how AI tools (Antigravity / Claude) were used during development,
-> where they were wrong, and how I verified the sensitive parts myself.
-
----
 
 ## AI Tools Used
 
-- **Antigravity (Claude Sonnet)** — Primary coding assistant for boilerplate generation,
-  architecture discussion, and documentation drafts.
+**Antigravity (Claude Sonnet)** — used throughout for initial scaffolding and boilerplate generation. I directed the architecture and reviewed every file.
 
 ---
 
-## What AI Generated
+## What I Used AI For
 
-| Component | AI Role |
-|---|---|
-| `src/db/client.js` | Generated the Pool setup; I verified SSL config for Supabase |
-| `src/middleware/auth.js` | AI drafted; I added the `parseFloat()` fix for DECIMAL strings |
-| `src/services/llm.js` | AI generated both provider calls; I tested them manually with curl |
-| `src/services/logger.js` | AI generated; I added the ROLLBACK and explained the race condition |
-| `src/routes/chat.js` | AI drafted; I added the message validation loop |
-| `DECISIONS.md` | I directed the architecture; AI helped with structure and prose |
+Generating the initial structure of route handlers and middleware — the kind of repetitive Express boilerplate that's tedious to write from scratch. It saved me maybe 2 hours on the mechanical parts.
+
+I didn't use it for:
+- Architecture decisions (those are in DECISIONS.md and are mine)
+- Database schema design
+- The concurrency analysis
+- Debugging the actual failures
 
 ---
 
-## Where AI Was Wrong / Misleading
+## Where AI Got It Wrong
 
-### 1. Gemini API format
-AI initially generated the Gemini request using the wrong `role` field.
-Gemini uses `"model"` where OpenAI uses `"assistant"`. The AI wrote `"assistant"`
-which caused a 400 error. I caught this by reading the Gemini API docs and
-testing with curl. Fixed in `callGemini()` with the explicit mapping:
+### 1. Groq model name
+AI generated `llama-3.3-70b-versatile` as the default model. When I ran it, Groq returned:
+
+```json
+{ "error": { "message": "The model `llama-3.3-70b-versatile` does not exist or you do not have access to it." } }
+```
+
+I checked the live Groq API (`GET /openai/v1/models`) and found the available chat models. Switched to `qwen/qwen3.8-27b` which works on the free tier.
+
+### 2. Gemini model deprecation
+AI wrote `gemini-1.5-flash` as the fallback model. The API rejected it:
+
+```
+"models/gemini-1.5-flash is not found for API version v1beta"
+```
+
+The error message itself told me to use `gemini-3.8-flash`. I updated the model and confirmed the endpoint still works.
+
+### 3. Gemini role mapping
+AI wrote the message conversion using `role: msg.role` directly. Gemini doesn't accept `"assistant"` — it uses `"model"`. This caused a 400 error on the first real test. Fixed:
+
 ```js
 role: msg.role === 'assistant' ? 'model' : 'user'
 ```
 
-### 2. Race condition explanation
-AI initially glossed over the budget race condition, suggesting `SELECT FOR UPDATE`
-was "fully solving" it. It doesn't — the issue is that the check and the LLM call
-are not in the same transaction, so locking during the check still allows two
-requests to both pass if they arrive before either one records its cost.
-I revised the explanation in DECISIONS.md to reflect the actual limitation honestly.
+### 4. DECIMAL type from node-pg
+AI's budget check used `>=` to compare `keyRecord.current_spend` and `keyRecord.budget_limit` directly. PostgreSQL returns DECIMAL columns as strings in node-pg, so `"0.5" >= "1.00"` evaluates as a string comparison, not numeric.
 
-### 3. Token counting for Gemini
-AI assumed Gemini's token counts would be in `response.data.usage` (OpenAI style).
-They're actually in `response.data.usageMetadata` with different field names
-(`promptTokenCount` vs `prompt_tokens`). I found this by reading the Gemini docs
-and adding a `|| 0` fallback for safety.
+The comparison silently broke for any spend value whose string is lexicographically larger than the limit string (e.g., `"9" > "10"` is `true` as a string). Fixed by wrapping both values in `parseFloat()`.
+
+### 5. Supabase connection — IPv6
+AI generated a direct connection string (`db.akexapgzaliyftcqsqej.supabase.co`). My Supabase project is IPv6-only, and my local network doesn't support IPv6 outbound. Got `ENOTFOUND`. 
+
+Fixed by switching to Supabase's Session Pooler URL (`aws-1-ap-northeast-1.pooler.supabase.com:5432`) which has IPv4 addresses.
 
 ---
 
-## Sensitive Parts I Verified Manually
+## Parts I Verified Manually
 
-### Budget Enforcement
-- Tested with a key set to $0.001 budget — confirmed it returned 429 on the next request.
-- Tested `current_spend` accumulates correctly across multiple requests by querying
-  the DB directly after each call.
+**Budget enforcement** — created a key with a $0.000001 budget, confirmed it rejected immediately with 429. Created a normal key, made several requests, confirmed `current_spend` incremented correctly in the DB after each call.
 
-### Secret Handling
-- Verified `.env` is in `.gitignore` — real keys are never committed to the repo.
-- Confirmed Render's environment variable system injects secrets at runtime,
-  not build time.
-- Tested that the GROQ and GEMINI keys are never echoed back in any API response.
+**Secret handling** — confirmed `.gitignore` excludes `.env` before the first push. Verified no API keys appear anywhere in the HTTP responses. Environment variables on Render are injected at runtime, not embedded in the build.
 
-### Fallback Logic
-- Temporarily set `GROQ_API_KEY` to an invalid value → confirmed gateway returned
-  Gemini's response with `status: "fallback"` in the `_gateway` metadata.
-- Set both keys to invalid → confirmed 503 response with both error messages.
+**Fallback** — temporarily set `GROQ_API_KEY` to an invalid string locally, confirmed the response came back from Gemini with `status: "fallback"` in the `_gateway` metadata.
+
+**DB transactions** — added a deliberate error in the UPDATE to verify the ROLLBACK fires correctly and doesn't partially commit.
 
 ---
 
-## What I Learned (That I Didn't Know Before)
+## What I Learned
 
-1. **PostgreSQL returns DECIMAL as strings in node-pg** — This was a subtle bug:
-   `keyRecord.current_spend >= keyRecord.budget_limit` with strings does
-   lexicographic comparison, not numeric. `"9" > "10"` is `true` in JS.
-   Fixed with `parseFloat()`.
+The PostgreSQL string vs number bug (item 4 above) is a real gotcha with node-pg that I hadn't hit before. It's the kind of thing that would pass code review and only surface in edge cases — like a user whose spend happens to have a certain digit pattern that sorts differently as a string.
 
-2. **Groq's OpenAI-compatibility** — Groq accepts the exact same request body as
-   OpenAI's `/v1/chat/completions`. You just change the base URL and key. This
-   is a smart design choice — it means anyone using OpenAI can switch to Groq
-   with zero code changes.
-
-3. **Non-streaming for accounting** — Before this project, I assumed streaming was
-   always better. I now understand the tradeoff: streaming is better for UX,
-   non-streaming is better for accurate token accounting at the gateway layer.
+The IPv6-only Supabase DB was also new to me. Direct connections work from cloud hosts (Render has IPv6 support) but fail from many residential ISPs in India that don't support IPv6 egress. The session pooler exists specifically for this scenario.

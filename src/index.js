@@ -1,99 +1,92 @@
-// src/index.js
-// ─────────────────────────────────────────────────────────────
-// Entry point. Sets up Express, registers all routes and middleware,
-// verifies DB connectivity, and starts listening.
-// ─────────────────────────────────────────────────────────────
-require('dotenv').config(); // Load .env file (only matters locally; Render uses its own env vars)
+require('dotenv').config();
 
 const express = require('express');
-const pool    = require('./db/client');
+const { v4: uuidv4 } = require('uuid');
+const pool = require('./db/client');
 
 const authMiddleware = require('./middleware/auth');
 const chatRoutes     = require('./routes/chat');
 const usageRoutes    = require('./routes/usage');
 const adminRoutes    = require('./routes/admin');
+const dashboardRoute = require('./routes/dashboard');
 
 const app  = express();
 const PORT = process.env.PORT || 3000;
 
-// ── Global Middleware ─────────────────────────────────────────
-app.use(express.json()); // Parse JSON request bodies
+app.use(express.json());
 
-// Simple request logger so you can see what's coming in
+// Attach a unique request ID to every request for traceability
 app.use((req, res, next) => {
-  console.log(`[${new Date().toISOString()}] ${req.method} ${req.path}`);
+  req.requestId = uuidv4();
+  res.setHeader('X-Request-ID', req.requestId);
   next();
 });
 
-// ── Routes ───────────────────────────────────────────────────
+// Structured request logging
+app.use((req, res, next) => {
+  const start = Date.now();
+  res.on('finish', () => {
+    console.log(JSON.stringify({
+      type: 'request',
+      requestId: req.requestId,
+      method: req.method,
+      path: req.path,
+      status: res.statusCode,
+      durationMs: Date.now() - start,
+      ts: new Date().toISOString(),
+    }));
+  });
+  next();
+});
 
-// Health check — no auth needed
-// Deployment platforms ping this to know the service is alive
+// Routes
+app.get('/', dashboardRoute);
+
 app.get('/health', async (req, res) => {
   try {
-    await pool.query('SELECT 1'); // quick DB connectivity check
-    res.status(200).json({
-      status:    'ok',
-      service:   'llm-gateway',
-      timestamp:  new Date().toISOString(),
-      database:  'connected',
+    const result = await pool.query('SELECT NOW() as ts');
+    res.json({
+      status: 'ok',
+      service: 'llm-gateway',
+      version: '1.0.0',
+      database: 'connected',
+      dbTime: result.rows[0].ts,
+      uptime: Math.floor(process.uptime()) + 's',
+      timestamp: new Date().toISOString(),
     });
   } catch (err) {
-    res.status(503).json({
-      status:   'degraded',
-      database: 'disconnected',
-      error:    err.message,
-    });
+    res.status(503).json({ status: 'degraded', database: 'disconnected', error: err.message });
   }
 });
 
-// Main chat completions endpoint — protected by auth middleware
-// The auth middleware runs first, then the route handler
 app.use('/v1/chat/completions', authMiddleware, chatRoutes);
-
-// Usage dashboard — no auth needed (key itself is the identifier)
 app.use('/usage', usageRoutes);
-
-// Admin route — protected by X-Admin-Secret header
 app.use('/admin', adminRoutes);
 
-// ── 404 Handler ───────────────────────────────────────────────
 app.use((req, res) => {
   res.status(404).json({
-    error: 'Route not found.',
-    available_routes: [
-      'GET  /health',
-      'POST /v1/chat/completions  (requires Authorization: Bearer vk_xxx)',
-      'GET  /usage?key=vk_xxx',
-      'POST /admin/keys           (requires X-Admin-Secret header)',
-    ],
+    error: 'Not found',
+    path: req.path,
+    docs: 'GET / for API reference',
   });
 });
 
-// ── Global Error Handler ──────────────────────────────────────
-// Catches any unhandled errors that bubble up from route handlers
 app.use((err, req, res, next) => {
-  console.error('[Unhandled Error]', err);
-  res.status(500).json({ error: 'An unexpected error occurred.', message: err.message });
+  console.error(JSON.stringify({ type: 'unhandled_error', requestId: req.requestId, message: err.message, stack: err.stack }));
+  res.status(500).json({ error: 'Internal server error', requestId: req.requestId });
 });
 
-// ── Start Server ──────────────────────────────────────────────
 async function start() {
-  // Test DB connection before accepting traffic
   try {
     await pool.query('SELECT 1');
-    console.log('[Startup] ✅ Database connected');
+    console.log('Database connection verified');
   } catch (err) {
-    console.error('[Startup] ❌ Database connection failed:', err.message);
-    console.error('[Startup] Make sure DATABASE_URL is set correctly in your .env file');
-    process.exit(1); // crash early with a clear error rather than silently fail later
+    console.error('Database connection failed:', err.message);
+    process.exit(1);
   }
 
   app.listen(PORT, () => {
-    console.log(`[Startup] ✅ LLM Gateway running on http://localhost:${PORT}`);
-    console.log(`[Startup]    Health: http://localhost:${PORT}/health`);
-    console.log(`[Startup]    Chat:   POST http://localhost:${PORT}/v1/chat/completions`);
-    console.log(`[Startup]    Usage:  GET  http://localhost:${PORT}/usage?key=vk_xxx`);
+    console.log(`LLM Gateway listening on port ${PORT}`);
   });
 }
 
